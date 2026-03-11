@@ -1,12 +1,18 @@
 package hr.unidu.kz.primjersvihelemenata
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.CalendarContract
 import android.widget.Button
@@ -14,47 +20,70 @@ import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : AppCompatActivity() {
 
-    // Launcher koji čeka odgovor korisnika na zahtjev za dozvolu
+    private val mojReceiver = TimerReceiver()
+
+    // Launcher koji čeka odgovor korisnika za dozvolu obavijesti
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
         if (isGranted) {
-            Toast.makeText(this, "Dozvola odobrena!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Dozvola za obavijesti odobrena!", Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(this, "Bez dozvole ne mogu pisati u kalendar.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Bez dozvole neću moći prikazati završetak mjerenja.", Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main) // Povezuješ se s XML-om
+        setContentView(R.layout.activity_main)
+
+        // Traži dozvolu za notifikacije (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         val btn = findViewById<Button>(R.id.btnPokreni)
-
         btn.setOnClickListener {
-            // Provjera dozvole
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_CALENDAR) == PackageManager.PERMISSION_GRANTED) {
-                startService(Intent(this, TimerService::class.java))
-            } else {
-                // Traženje dozvole
-                requestPermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
-            }
+            // Nema više provjere kalendara, samo pokrećemo servis
+            startService(Intent(this, TimerService::class.java))
+            Toast.makeText(this, "Mjerenje počinje...", Toast.LENGTH_SHORT).show()
         }
     }
-}
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    override fun onResume() {
+        super.onResume()
+        // Registracija receivera uz sigurnosnu zastavicu
+        val filter = IntentFilter("TIMER_FINISHED")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(mojReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(mojReceiver, filter)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        unregisterReceiver(mojReceiver)
+    }
+}
 class TimerService : Service() {
     override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
         Thread {
             Thread.sleep(5000) // Simulacija rada
             // Šalje broadcast nakon rada
-            sendBroadcast(Intent("TIMER_FINISHED").putExtra("vrijeme", "5 sekundi"))
+            val intent = Intent("TIMER_FINISHED")
+            intent.setPackage(packageName) // 'packageName' automatski dohvaća ID tvoje aplikacije
+            intent.putExtra("vrijeme", "5 sekundi")
+            sendBroadcast(intent)
+
             stopSelf()
         }.start()
         return START_STICKY
@@ -63,19 +92,31 @@ class TimerService : Service() {
 }
 
 class TimerReceiver : BroadcastReceiver() {
+    @SuppressLint("ServiceCast")
     override fun onReceive(context: Context, intent: Intent) {
-        val vrijeme = intent.getStringExtra("vrijeme")
+        val channelId = "mjerenje_channel"
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-        // ContentResolver: Upis u kalendar
-        val values = ContentValues().apply {
-            put(CalendarContract.Events.DTSTART, System.currentTimeMillis())
-            put(CalendarContract.Events.DTEND, System.currentTimeMillis() + 60000)
-            put(CalendarContract.Events.TITLE, "Završeno mjerenje: $vrijeme")
-            put(CalendarContract.Events.CALENDAR_ID, 1) // ID primarnog kalendara
-            put(CalendarContract.Events.EVENT_TIMEZONE, "UTC")
+        // 1. Kreiraj kanal (potrebno za Android 8.0+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId, "Obavijesti mjerenja",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            notificationManager.createNotificationChannel(channel)
         }
 
-        context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
-        Toast.makeText(context, "Spremljeno u kalendar!", Toast.LENGTH_LONG).show()
+        // 2. Napravi samu obavijest
+        val builder = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm) // Ikona
+            .setContentTitle("Mjerenje završeno")
+            .setContentText("Tvoje mjerenje od 5 sekundi je uspješno gotovo!")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true) // Obavijest nestaje kad se klikne na nju
+
+        // 3. Pokaži obavijest
+        notificationManager.notify(1, builder.build())
+
+        Toast.makeText(context, "Sustav primio signal!", Toast.LENGTH_SHORT).show()
     }
 }
